@@ -3,7 +3,7 @@
    :alt: Odoo Community Association
 
 ===================
-Dms Attachment Link
+DMS Attachment Link
 ===================
 
 .. 
