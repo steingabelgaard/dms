@@ -135,3 +135,58 @@ class TestDmsPortal(odoo.tests.HttpCase, StorageAttachmentBaseCase):
             file.check_access("write")
         with self.assertRaises(AccessError, msg="Portal user should not have access"):
             file.check_access("unlink")
+
+    @users("portal")
+    @mute_logger("odoo.addons.base.models.ir_rule")
+    def test_binary_access_token(self):
+        """Binary streaming (``/web/image``) honors DMS access tokens.
+
+        Odoo 19 replaced ``ir.binary._find_record_check_access()`` with the
+        ``_can_return_content()`` record hook: without the DMS override,
+        portal icons/previews of shared records break for users without
+        read access.
+        """
+        file_sudo = self.other_file_partner.sudo()
+        token = file_sudo._portal_ensure_token()
+        binary = self.env["ir.binary"].with_env(self.env(su=False))
+        # Sanity: without a token the record is not reachable
+        with self.assertRaises(AccessError):
+            binary._find_record(
+                res_model="dms.file", res_id=file_sudo.id, field="image_128"
+            )
+        # A valid token grants (sudo) streaming access
+        record = binary._find_record(
+            res_model="dms.file",
+            res_id=file_sudo.id,
+            access_token=token,
+            field="image_128",
+        )
+        self.assertTrue(record.env.su)
+        self.assertEqual(record.id, file_sudo.id)
+        # Directories resolve tokens too
+        directory_sudo = self.other_directory_partner.sudo()
+        dir_token = directory_sudo._portal_ensure_token()
+        record = binary._find_record(
+            res_model="dms.directory",
+            res_id=directory_sudo.id,
+            access_token=dir_token,
+            field="image_128",
+        )
+        self.assertTrue(record.env.su)
+
+    def test_portal_directory_search(self):
+        """Portal directory name search must actually filter.
+
+        Both 18.0 (``expression.OR``) and the ported 19.0 code built
+        ``OR([[], [...]])`` — the empty domain is TRUE, so the OR collapsed
+        and the search never filtered anything.
+        """
+        self.authenticate("portal", "portal")
+        response = self.url_open("/my/dms?search_in=name&search=zzz-no-match")
+        self.assertNotIn(
+            "Partners",
+            response.text,
+            "A non-matching search must filter out the Partners directory",
+        )
+        response = self.url_open("/my/dms?search_in=name&search=Partners")
+        self.assertIn("Partners", response.text)
