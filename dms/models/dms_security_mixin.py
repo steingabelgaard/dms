@@ -6,7 +6,7 @@
 
 from logging import getLogger
 
-from odoo import SUPERUSER_ID, api, fields, models
+from odoo import api, fields, models
 from odoo.exceptions import AccessError
 from odoo.fields import Domain
 from odoo.tools import SQL
@@ -199,32 +199,25 @@ class DmsSecurityMixin(models.AbstractModel):
     @api.model
     def _get_permission_domain(self, operator, value, operation):
         """Abstract logic for searching computed permission fields."""
-        _self = self
-        # HACK ir.rule domains are evaluated in superuser mode while env.uid
-        # stays the acting user, so `su` together with a non-root uid means we
-        # are resolving the `permission_<op> = user.id` rule on that user's
-        # behalf. The Domain engine coerces that sentinel to this Boolean
-        # field's type before we get here, so we rely on env.uid (used by
-        # _get_access_groups_query) rather than the value to build the domain.
-        if self.env.su and self.env.uid != SUPERUSER_ID:
-            _self = self.sudo(False)
-            value = bool(value)
-        # Tricky one, to know if you want to search
-        # positive or negative access
-        positive = (operator not in Domain.NEGATIVE_OPERATORS) == bool(value)
+        # The domain optimizer normalizes any value searched on these Boolean
+        # fields to [True], flipping the operator when needed, so the operator
+        # alone carries the polarity and `value` never reaches this method
+        # unnormalized. ir.rule domains are evaluated with su while env.uid
+        # stays the acting user; sudo(False) recovers that user, except for
+        # the real superuser, whose environment keeps su set.
+        _self = self.sudo(False) if self.env.su else self
+        positive = operator == "in"
         if _self.env.su:
-            # You're SUPERUSER_ID
             return Domain.TRUE if positive else Domain.FALSE
-
         result = Domain.OR(
             [
                 _self._get_domain_by_access_groups(operation),
                 _self._get_domain_by_inheritance(operation),
             ]
         )
-        if not positive:
-            result = ~Domain(result)
-        return result
+        # `determine_domain` dispatches negative operators straight to this
+        # search method, so `not in` must be negated here.
+        return result if positive else ~result
 
     @api.model
     def _search_permission_create(self, operator, value):
@@ -241,6 +234,13 @@ class DmsSecurityMixin(models.AbstractModel):
     @api.model
     def _search_permission_write(self, operator, value):
         return self._get_permission_domain(operator, value, "write")
+
+    def _can_return_content(self, field_name=None, access_token=None):
+        # Used to display the icon/preview in the portal: the user might not
+        # have access to the record, but the token makes it public.
+        if access_token and self.sudo().check_access_token(access_token):
+            return True
+        return super()._can_return_content(field_name, access_token)
 
     def filtered_domain(self, domain):
         """This method is needed to inhibit the behavior when called from the
